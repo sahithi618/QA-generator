@@ -1,7 +1,3 @@
-"""
-QA Generator + Verifier for 10-K chunks
-Pipeline: Generate → Verify → Deduplicate → Save
-"""
 
 from ast import Return
 import csv
@@ -55,123 +51,8 @@ def normalize_type(raw: str) -> str:
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip()).lower()
 
-# ── OLLAMA HELPERS ────────────────────────────────────────────────────────────
-
-def check_ollama_installed() -> bool:
-    try:
-        result = subprocess.run(["ollama", "--version"], capture_output=True, text=True)
-        print(f"✓ Ollama found: {result.stdout.strip()}")
-        return True
-    except FileNotFoundError:
-        return False
-
-def check_ollama_running() -> bool:
-    try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
-        return response.status_code == 200
-    except:
-        return False
-
-def start_ollama_server() -> bool:
-    print("Starting Ollama server...")
-    try:
-        subprocess.Popen(
-            ["ollama", "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        for _ in range(30):
-            if check_ollama_running():
-                print("✓ Ollama server is running")
-                return True
-            time.sleep(1)
-        print("✗ Ollama server failed to start")
-        return False
-    except Exception as e:
-        print(f"✗ Error starting Ollama: {e}")
-        return False
-
-def list_available_models() -> list[str]:
-    try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            return list({m["name"].split(":")[0] for m in data.get("models", [])})
-    except:
-        pass
-    return []
-
-def pull_model(model_name: str) -> bool:
-    print(f"Downloading model: {model_name}...")
-    try:
-        result = subprocess.run(
-            ["ollama", "pull", model_name],
-            capture_output=True, text=True, timeout=600
-        )
-        if result.returncode == 0:
-            print(f"✓ Model {model_name} downloaded")
-            return True
-        print(f"✗ Failed: {result.stderr}")
-        return False
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        return False
-    
-
-
-def setup_ollama(preferred_model: str = "phi3:mini") -> Optional[str]:
-    print("=" * 60)
-    print("OLLAMA SETUP")
-    print("=" * 60)
-
-    if not check_ollama_installed():
-        print("✗ Ollama not installed. Download from https://ollama.ai")
-        return None
-
-    if not check_ollama_running():
-        if not start_ollama_server():
-            return None
-    else:
-        print("✓ Ollama server already running")
-
-    available = list_available_models()
-    if available:
-        print(f"Available models: {', '.join(available)}")
-
-    if preferred_model not in available:
-        print(f"Model '{preferred_model}' not found. Downloading...")
-        if not pull_model(preferred_model):
-            fallback = "mistral"
-            print(f"Trying fallback: {fallback}")
-            if not pull_model(fallback):
-                print("Failed. Run manually: ollama pull llama3")
-                return None
-            preferred_model = fallback
-
-    print(f"✓ Setup complete. Using: {preferred_model}")
-    return preferred_model
-
 
 # ── STAGE 1: GENERATION ───────────────────────────────────────────────────────
-
-def call_ollama(prompt: str, model: str, temperature: float = 0.7) -> str:
-    """Raw call to Ollama. Returns response text or empty string."""
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False, "temperature": temperature},
-            timeout=120,
-        )
-        response.raise_for_status()
-        return response.json().get("response", "")
-    except requests.exceptions.Timeout:
-        print("  ⚠ Timeout")
-        return ""
-    except Exception as e:
-        print(f"  ✗ {str(e)[:80]}")
-        return ""
-
 
 def parse_jsonlines(text: str) -> list[dict]:
     """Extracts JSON objects from a response that may have extra text around them."""
@@ -246,11 +127,6 @@ def generate_qa_groq(
 
 
 # ── STAGE 2: VERIFICATION ─────────────────────────────────────────────────────
-# Runs as a SEPARATE pass after all generation is done.
-# Two checks:
-#   Check A — Source grounding: is the source passage actually in the chunk?
-#   Check B — Answer support:   is the answer supported by source + chunk?
-# Both must pass. Reason is logged for every rejection.
 
 def _token_overlap(a: str, b: str) -> float:
     """Fraction of meaningful tokens in `a` that appear in `b`."""
@@ -492,14 +368,6 @@ def main():
     parser.add_argument("--model",         default="phi3:mini")
     args = parser.parse_args()
 
-    # Ollama setup
-    if args.setup or not check_ollama_running():
-        model = setup_ollama(args.model)
-        if not model:
-            sys.exit(1)
-        args.model = model
-    else:
-        print(f"Using model: {args.model}")
 
     # Load chunks
     print(f"\nLoading chunks from {args.input}...")
