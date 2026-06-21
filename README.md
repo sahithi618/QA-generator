@@ -4,6 +4,8 @@
 
 This project generates structured question-answer datasets from SEC 10-K filings. The pipeline extracts meaningful content from filing HTML, identifies major SEC sections, creates context-preserving chunks, generates QA pairs using a Large Language Model (LLM), and applies validation and deduplication before producing the final dataset.
 
+I have selected Microsoft's recent 10-K filing in this pipeline and the output file is produced for the same.
+
 The design prioritizes:
 
 - Grounding to source text
