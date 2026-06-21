@@ -2,154 +2,417 @@
 
 ## Overview
 
-This pipeline converts SEC 10-K filings into structured question-answer datasets.
-It parses filing HTML, extracts major sections, splits text into chunks, and uses an LLM to generate QA pairs.
-A verification pass then filters and deduplicates the output before saving the final dataset.
+This project generates structured question-answer datasets from SEC 10-K filings. The pipeline extracts meaningful content from filing HTML, identifies major SEC sections, creates context-preserving chunks, generates QA pairs using a Large Language Model (LLM), and applies validation and deduplication before producing the final dataset.
 
-The main implementation files are:
-- `src/parser.py` → HTML cleanup, TOC extraction, section resolution, paragraph extraction, chunking
-- `src/chunker.py` → chunk generation from parsed paragraphs
-- `src/qa_generator.py` → Groq-backed QA generation, grounding verification, deduplication
+The design prioritizes:
 
+- Grounding to source text
+- Traceability to filing sections
+- Cost-efficient generation
+- Modular and extensible processing
+
+### Main Components
+
+- `src/parser.py`
+  - HTML cleaning
+  - Dynamic Table of Contents extraction
+  - Section resolution
+  - Paragraph extraction and deduplication
+
+- `src/chunker.py`
+  - Paragraph cleaning
+  - Sentence-aware chunking
+  - Token-aware splitting
+  - Context overlap management
+
+- `src/qa_generator.py`
+  - QA generation using Groq
+  - Grounding verification
+  - Quality filtering
+  - Dataset deduplication
+
+---
 
 ## Pipeline
 
-1. Clean raw 10-K HTML
-   - Remove scripts, styles, hidden XBRL metadata, and other non-content tags
-   - Keep visible paragraphs and headings
+### 1. HTML Cleaning
 
-2. Extract the Table of Contents
-   - Detect SEC item labels such as `Item 1`, `Item 1A`, `Item 7`, `Item 8`
-   - Use anchors and surrounding text to locate section starts
+The pipeline begins by parsing raw SEC filing HTML using BeautifulSoup with the `lxml` parser.
 
-3. Resolve section anchors
-   - Map TOC entries to actual content in the filing
-   - Fall back from anchor links to text matching when needed
+Before extraction, non-content elements are removed, including:
 
-4. Extract section paragraphs
-   - Collect paragraph-like blocks (`p`, `div`, `li`, headings)
-   - Filter out tables and low-quality text
-   - Deduplicate near-duplicate blocks introduced by EDGAR page structure
+- Scripts
+- Stylesheets
+- Hidden content
+- Navigation metadata
+- Inline XBRL tags (`ix:header`, `ix:hidden`)
 
-5. Chunk text for generation
-   - Combine paragraphs into chunks of roughly 400–500 words
-   - Preserve paragraph boundaries within chunks
-   - Avoid overly large prompts that reduce generation quality
+Character encoding is automatically detected using `chardet` to improve robustness across filings with different encodings.
 
-6. Generate QA pairs
-   - Use an LLM backend to generate QA pairs per chunk
-   - Backend examples:
-     - Groq (`src/qa_generator.py`)
-   - Prompt the model to return JSON-lines output for structured parsing
+---
 
-7. Verify and deduplicate
-   - Ground each QA pair against the source chunk
-   - Reject pairs with missing source grounding, low-quality questions, or cloning artifacts
-   - Remove duplicate question-answer pairs
+### 2. Dynamic Table of Contents Extraction
+
+Major SEC filing sections are identified dynamically instead of relying on hardcoded section positions.
+
+The parser detects section labels such as:
+
+- Item 1
+- Item 1A
+- Item 1B
+- Item 7
+- Item 8
+
+Two complementary extraction strategies are used:
+
+1. Anchor-based extraction from hyperlinks.
+2. Plain-text extraction from rows, paragraphs, and list elements.
+
+This improves compatibility across different filing formats.
+
+---
+
+### 3. Section Resolution
+
+Each discovered TOC entry is mapped to its corresponding location in the filing.
+
+To improve robustness, the parser attempts multiple resolution strategies:
+
+- Exact anchor matching
+- HTML ID matching
+- Normalized anchor matching
+- Label-title matching
+- Label-only fallback matching
+
+This approach increases the likelihood of correctly identifying section boundaries even when filings use inconsistent markup.
+
+---
+
+### 4. Paragraph Extraction and Cleaning
+
+After section boundaries are identified, content is extracted between consecutive sections.
+
+The extraction process:
+
+- Removes all table content
+- Filters short or low-quality text
+- Removes formatting artifacts
+- Keeps only paragraph-level content
+
+Supported content blocks include:
+
+- Paragraphs (`p`)
+- Divisions (`div`)
+- List items (`li`)
+- Headings (`h1`–`h5`)
+
+---
+
+### 5. Paragraph Deduplication
+
+SEC filings frequently contain duplicated content due to EDGAR formatting and nested HTML structures.
+
+To reduce redundancy, extracted text blocks are compared using token-overlap similarity.
+
+Near-duplicate paragraphs are removed before chunk generation, producing cleaner source material for downstream QA generation.
+
+---
+
+### 6. Context-Preserving Chunking
+
+Long filing sections are divided into smaller chunks suitable for LLM processing.
+
+The chunking stage uses:
+
+- Token-aware sizing via `tiktoken`
+- Sentence boundary preservation
+- Sliding window chunk construction
+- Configurable context overlap
+
+Default configuration:
+
+- Maximum chunk size: 300 tokens
+- Overlap: 75 tokens
+
+This balances context availability with generation quality.
+
+---
+
+### 7. Long-Sentence Handling
+
+Some financial disclosures contain unusually long sentences that exceed chunk limits.
+
+When necessary, the chunker performs controlled token-based splitting while attempting to preserve natural language boundaries.
+
+This prevents oversized prompts without discarding information.
+
+---
+
+### 8. QA Generation
+
+Each chunk is independently processed to generate grounded question-answer pairs.
+
+### Model Selection
+
+The generation stage uses:
+
+`meta-llama/llama-4-scout-17b-16e-instruct`
+
+accessed through the Groq API.
+
+This model was selected because it provided the strongest balance of:
+
+- Generation quality
+- Context understanding
+- Reliability
+- Token availability
+
+among the models available during development.
+
+The model consistently produced grounded QA pairs while remaining practical for large-scale dataset generation.
+
+---
+
+### 9. Structured Output Generation
+
+For each chunk, the model generates up to two question-answer pairs.
+
+Each pair includes:
+
+- Question
+- Answer
+- Supporting source sentence
+- Question type
+- Difficulty label
+
+Supported question types:
+
+- Fact Extraction
+- Numeric Calculation
+- Comparison
+- Multi-Step Reasoning
+
+The model is instructed to return JSON-lines output to simplify parsing and downstream processing.
+
+---
+
+### 10. Rule-Based Verification
+
+A separate LLM verification stage was intentionally avoided to reduce inference cost and improve throughput.
+
+Instead, generated QA pairs are validated using deterministic checks.
+
+Verification consists of:
+
+#### Source Grounding Validation
+
+Every QA pair must provide a source sentence.
+
+The source is accepted only if:
+
+- It appears directly in the original chunk, or
+- It achieves a high token-overlap similarity score
+
+#### Clone Detection
+
+Rejects cases where:
+
+- The answer duplicates the source verbatim
+- The question is embedded inside the answer
+
+#### Question Quality Validation
+
+Questions must:
+
+- Contain meaningful interrogative structure
+- Meet minimum length requirements
+- Use valid question forms
+
+Examples include:
+
+- What
+- Why
+- How
+- Which
+- When
+- Who
+
+Only QA pairs that pass all verification checks are retained.
+
+---
+
+### 11. Dataset Deduplication
+
+Generated QA pairs are deduplicated using normalized question-answer matching.
+
+This removes repeated outputs generated from overlapping chunks and semantically similar sections.
+
+The result is a cleaner and more diverse dataset.
+
+---
 
 ## Usage
 
-Run the parser to extract sections and paragraphs first:
+### Step 1: Parse Filing
 
 ```powershell
 python src/parser.py
 ```
 
-This will produce a parsed JSON file such as `parsed_10k_2.json`.
+Output:
 
-Run the chunker to get smaller portions of text:
+```text
+parsed_10k_2.json
+```
+
+---
+
+### Step 2: Generate Chunks
 
 ```powershell
 python src/chunker.py
 ```
 
-This will produce a chunked JSON file such as `chunks_10k.json`.
+Output:
 
-Generate QA pairs from chunked data:
+```text
+chunks_10k.json
+```
+
+---
+
+### Step 3: Generate QA Dataset
 
 ```powershell
 python src/qa_generator.py --input chunks_10k.json --output qa_10k.json --rejected qa_rejected.json --csv
 ```
 
-Or specify a different LLM backend:
-
-```powershell
-python src/qa_generator.py --input chunks_10k.json --output qa_10k.json --backend openai
-```
+---
 
 ## Design Choices
 
-### Why parse by section and chunk text?
+### Why BeautifulSoup with lxml?
 
-- SEC filings are long and semi-structured. Section-aware parsing keeps QA generation aligned with the document's natural hierarchy.
-- Chunking into paragraph-aware windows reduces prompt length and helps the LLM stay grounded in a small context.
+SEC filings often contain malformed and inconsistent HTML.
 
-### Why separate generation from verification?
+BeautifulSoup provides a robust DOM-based parsing approach while the `lxml` backend offers efficient processing of large filings.
 
-- Generation can produce plausible but unsupported answers.
-- A second pass validates the source quote and rejects obvious failures without repeating generation costs.
-- This keeps the final dataset cleaner and easier to inspect.
+This combination improves reliability compared to regex-based extraction.
 
-### Why support multiple backends?
+### Why Dynamic TOC Extraction?
 
-- Local or remote LLM backends provide flexibility when Groq is unavailable.
-- Hugging Face and OpenAI support remote inference and provide fallback options when a local model is unavailable.
+Different filings use different formatting conventions.
+
+Dynamic TOC discovery avoids dependence on filing-specific templates and improves generalization across companies and filing years.
+
+### Why Remove Tables?
+
+Financial tables often contain highly structured layouts that are difficult to convert into clean natural-language context.
+
+The current pipeline focuses on narrative disclosures and management discussion sections, where question-answer generation is most effective.
+
+### Why Sentence-Based Chunking?
+
+Splitting text arbitrarily can break important context.
+
+Sentence-aware chunking preserves semantic structure and improves grounding quality during generation.
+
+### Why Overlapping Chunks?
+
+Important information frequently appears near chunk boundaries.
+
+A sliding-window overlap preserves contextual continuity and reduces information loss between neighboring chunks.
+
+### Why Use Llama 4 Scout?
+
+The selected model provided the best trade-off between:
+
+- Output quality
+- Reliability
+- Context handling
+- Token availability
+
+while remaining practical for large-scale generation workloads.
+
+### Why Rule-Based Verification?
+
+Using a second LLM verifier significantly increases latency and token consumption.
+
+Rule-based validation provides:
+
+- Faster execution
+- Lower cost
+- Deterministic behavior
+
+while still filtering many unsupported or low-quality outputs.
+
+### Why Preserve Metadata?
+
+Every QA pair retains filing, section, item, and chunk metadata.
+
+This improves traceability and enables future retrieval, filtering, evaluation, and dataset analysis workflows.
+
+### Why a Modular Architecture?
+
+The pipeline is separated into parsing, chunking, generation, verification, and deduplication stages.
+
+This simplifies debugging and allows individual components to be improved independently without affecting the rest of the system.
+
+---
 
 ## Output Format
 
-The final dataset includes fields such as:
-- `chunk_id`
-- `filing`
-- `section`
-- `item`
-- `question`
-- `answer`
-- `source`
-- `type`
-- `difficulty`
+Each verified QA pair contains:
 
-When CSV export is enabled, the repository also writes a `.csv` file for easier review.
+```json
+{
+  "chunk_id": 0,
+  "filing": "chunks_10k",
+  "section": "Item 1A – Risk Factors",
+  "item": "Item 1A",
+  "question": "...",
+  "answer": "...",
+  "source": "...",
+  "type": "fact extraction",
+  "difficulty": "medium"
+}
+```
+
+When CSV export is enabled, the dataset is also saved in CSV format for easier inspection.
+
+---
 
 ## Known Limitations
 
-- HTML parsing is brittle. SEC filings vary widely in markup, and section detection may fail for non-standard filings.
-- Table content is ignored by the current extractor, so numeric tables and structured disclosures are often lost.
-- LLM outputs still may hallucinate or generate partial answers even after verification.
-- Difficulty labels and question types are heuristic and depend on the model's output.
-- Rule-based verification is not a substitute for human review; it catches simple grounding issues but not subtle factual errors.
-- The current pipeline assumes one input filing at a time and does not yet include distributed batch orchestration.
+- SEC filings vary significantly in HTML structure, and some section boundaries may not be detected correctly.
+- Financial tables are currently excluded from extraction, causing some numerical disclosures to be omitted.
+- Rule-based verification cannot detect all factual inaccuracies.
+- Difficulty labels depend on model output rather than formal evaluation.
+- Semantic duplicates using different wording may occasionally survive deduplication.
+- The current implementation processes one filing at a time.
+- Human review is still recommended before using generated datasets for benchmarking or production applications.
+
+---
 
 ## Scaling to Multiple Documents or 1000+ QA Pairs
 
-To scale this design, I would:
+To scale the pipeline, the following improvements can be applied:
 
-1. Process documents independently
-   - Parse each filing into a separate chunk file
-   - Preserve filing metadata so outputs can be merged later
+1. Process filings independently and merge outputs using filing metadata.
+2. Batch generation requests to improve throughput.
+3. Cache generated outputs using chunk hashes.
+4. Parallelize chunk processing when API limits allow.
+5. Persist intermediate artifacts for resumability.
+6. Monitor acceptance and rejection statistics.
+7. Introduce embedding-based semantic deduplication.
+8. Deploy distributed worker pipelines for large filing collections.
 
-2. Use batched generation
-   - Keep chunk generation in batches of 20–50 chunks to avoid model overload
-   - Write intermediate outputs to disk frequently for resumability
+These changes would enable efficient generation of thousands of grounded QA pairs while maintaining quality and traceability.
 
-3. Cache generation results
-   - Hash each chunk text and save generated QA pairs
-   - Skip regeneration for unchanged chunks
-
-4. Parallelize safely
-   - Run multiple generator workers if the backend supports concurrent requests
-   - Keep verification local and lightweight to avoid repeated LLM calls
-
-5. Optimize prompts and chunk size
-   - Use smaller, high-quality chunks for more consistent QA pair grounding
-   - Reduce `num_questions` per chunk if the model starts to produce lower-quality outputs
-
-6. Monitor quality and rejection rates
-   - Track accepted vs rejected pair counts per document
-   - Adjust prompts, chunk size, and backend selection based on observed failures
-
-With these practices, generating 1,000+ high-quality pairs becomes practical by splitting work into smaller, reusable pieces, avoiding monolithic prompts, and storing parse/artifact files for repeatable batch processing.
+---
 
 ## Notes
 
-- The repository is intentionally designed as a research-style pipeline, not a production ingestion service.
-- The current focus is on grounding quality and traceability rather than on handling every possible SEC filing format.
+- This repository is designed as a research-oriented data generation pipeline rather than a production ingestion platform.
+- The primary goal is generating grounded, traceable QA datasets from long-form financial disclosures.
+- The design emphasizes transparency, reproducibility, and modularity over maximum throughput.
