@@ -2,14 +2,15 @@
 
 ## Overview
 
-This repository converts SEC 10-K filings into structured question-answer datasets.
+This pipeline converts SEC 10-K filings into structured question-answer datasets.
 It parses filing HTML, extracts major sections, splits text into chunks, and uses an LLM to generate QA pairs.
 A verification pass then filters and deduplicates the output before saving the final dataset.
 
 The main implementation files are:
-- `src/parser.py` &rarr; HTML cleanup, TOC extraction, section resolution, paragraph extraction, chunking
-- `src/qa_generator_ollama.py` &rarr; QA generation, grounding verification, deduplication, CSV export
-- `src/qa_generator.py` &rarr; alternate QA generation backend for Ollama / Hugging Face / OpenAI
+- `src/parser.py` → HTML cleanup, TOC extraction, section resolution, paragraph extraction, chunking
+- `src/chunker.py` → chunk generation from parsed paragraphs
+- `src/qa_generator.py` → Groq-backed QA generation, grounding verification, deduplication
+
 
 ## Pipeline
 
@@ -36,10 +37,9 @@ The main implementation files are:
    - Avoid overly large prompts that reduce generation quality
 
 6. Generate QA pairs
-   - Use an LLM backend to generate 1–2 QA pairs per chunk
+   - Use an LLM backend to generate QA pairs per chunk
    - Backend examples:
-     - Local Ollama / Groq (`src/qa_generator_ollama.py`)
-     - Hugging Face or OpenAI via `src/qa_generator.py`
+     - Groq (`src/qa_generator.py`)
    - Prompt the model to return JSON-lines output for structured parsing
 
 7. Verify and deduplicate
@@ -57,16 +57,24 @@ python src/parser.py
 
 This will produce a parsed JSON file such as `parsed_10k_2.json`.
 
+Run the chunker to get smaller portions of text:
+
+```powershell
+python src/chunker.py
+```
+
+This will produce a chunked JSON file such as `chunks_10k.json`.
+
 Generate QA pairs from chunked data:
 
 ```powershell
-python src/qa_generator_ollama.py --input chunks_10k.json --output qa_10k.json --rejected qa_rejected.json --csv
+python src/qa_generator.py --input chunks_10k.json --output qa_10k.json --rejected qa_rejected.json --csv
 ```
 
-Or use the alternative backend script:
+Or specify a different LLM backend:
 
 ```powershell
-python src/qa_generator.py --input chunks_10k.json --output qa_10k.json --backend ollama
+python src/qa_generator.py --input chunks_10k.json --output qa_10k.json --backend openai
 ```
 
 ## Design Choices
@@ -84,7 +92,7 @@ python src/qa_generator.py --input chunks_10k.json --output qa_10k.json --backen
 
 ### Why support multiple backends?
 
-- Local Ollama is useful for offline or low-cost generation.
+- Local or remote LLM backends provide flexibility when Groq is unavailable.
 - Hugging Face and OpenAI support remote inference and provide fallback options when a local model is unavailable.
 
 ## Output Format
